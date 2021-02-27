@@ -1,4 +1,4 @@
-void assemble( char * fpath )
+void assemble( int8_t * fpath )
 {
     // Reset current segment
     curseg = &text;
@@ -6,7 +6,7 @@ void assemble( char * fpath )
     fp = fpath; // Save file path string
     curline = 0; // Reset current line
     p = NULL; // Set default value for p
-    tk = TOK_EOL; // Set EOL token for readline inint
+    tk = TOK_EOL; // Set EOL token for readline init
     fd = open( fpath, 0 ); // Open file for reading
 
     // Cannot open file
@@ -21,25 +21,22 @@ void assemble( char * fpath )
             ntok();
             if ( tk != TOK_NAME ) asmfail("expected label"); // The following token MUST be a label
 
-            // Store ref to symbol
-            struct asmsym * cursym = symtbl + tkVal;
-
-            unsigned int val = cursym->val;
+            unsigned int16_t val = tkSym->val;
             // Set indirect bit if needed
             if ( tk == TOK_INDR ) val |= 0x8000;
             // This is a byte pointer
             else val << 1;
-            // This is a high byte pointer
-            if ( tk == TOK_BYHI ) val |= 1;
+            // This is a low byte pointer
+            if ( tk == TOK_BYLO ) val |= 1;
 
             // Compute relocation bits
-            unsigned int rloc = tkVal << 4 | cursym->type & SYM_MASK | tk != TOK_INDR;
+            unsigned int16_t rloc = tkVal << 4 | tkSym->type & SYM_MASK | tk != TOK_INDR;
 
             // Add any following numbers
             ntok();
             if ( tk == TOK_MATH )
             {
-                char doNeg = tkVal;
+                int8_t doNeg = tkVal;
 
                 ntok();
                 if ( tk != TOK_NUM ) asmfail("expected numberical constant");
@@ -59,8 +56,8 @@ void assemble( char * fpath )
         else if ( tk == TOK_NAME )
         {
             // Store ref to symbol
-            int cursymno = tkVal;
-            struct asmsym * cursym = symtbl + cursymno;
+            int16_t cursymno = tkVal;
+            struct asmsym * cursym = tkSym;
 
             ntok();
             // Label declaration
@@ -82,12 +79,12 @@ void assemble( char * fpath )
             // Some other token
             else
             {
-                unsigned int val = cursym->val;
+                unsigned int16_t val = cursym->val;
 
                 // Add any following numbers
                 if ( tk == TOK_MATH )
                 {
-                    char doNeg = tkVal;
+                    int8_t doNeg = tkVal;
 
                     ntok();
                     if ( tk != TOK_NUM ) asmfail("expected numerical constant");
@@ -107,8 +104,7 @@ void assemble( char * fpath )
         }
         else if ( tk == TOK_NUM || tk == TOK_MATH ) // Numerical constant
         {
-            unsigned int val = 0;
-            char doNeg;
+            int16_t doNeg, val = tkVal;
 
             // Numerical constant with prefix: -1234 or +1234
             if ( tk == TOK_MATH )
@@ -151,24 +147,24 @@ void assemble( char * fpath )
         }
         else if ( tk == TOK_STR ) // User defined string
         {
-            unsigned int val, i = 0;
+            unsigned int16_t val, i = 0;
 
             // Load string into segment
             while ( i < tkVal )
             {
-                val = ustr[i++] & 0xFF;
-                if ( i < tkVal ) val += (ustr[i++] & 0xFF) << 8;
+                val = (ustr[i++] & 0xFF) << 8;
+                if ( i < tkVal ) val += ustr[i++] & 0xFF;
                 segset( curseg, SYM_ABS, val );
                 curseg->data.pos++;
             }
 
             ntok();
         }
-        else if ( tk >= DGN_IONO && tk <= DGN_CTAA ) // DGNova instruction
+        else if ( tk >= DGN_IONO && tk <= DGN_VIAA ) // DGNova instruction
         {
-            int optyp = tk; // Type of instruction
-            int opval = tkVal; // The 16 bit instruction
-            int oprlc = SYM_ABS; // Relocation bits for the instruction
+            int16_t optyp = tk; // Type of instruction
+            int16_t opval = tkVal; // The 16 bit instruction
+            int16_t oprlc = SYM_ABS; // Relocation bits for the instruction
 
             // I/O Instruction, need a device code and maybe an accumulator
             if ( optyp == DGN_IONO || optyp == DGN_IO || optyp == DGN_IOSK )
@@ -219,8 +215,8 @@ void assemble( char * fpath )
                 if ( tk == TOK_NUM || tk == TOK_MATH ) // Numerical displacement (programmer can pick mode)
                 {
                     // Store displacement
-                    int disp = tkVal;
-                    int mode = 0;
+                    int16_t disp = tkVal;
+                    int16_t mode = 0;
 
                     if ( tk == TOK_MATH )
                     {
@@ -254,19 +250,19 @@ void assemble( char * fpath )
 
                     // Set mode and displacement
                     opval |= mode << 8;
-                    opval |= disp;
+                    opval |= disp & 0xFF;
                 }
                 else if ( tk == TOK_NAME ) // Label displacement (assembler picks mode)
                 {
                     // Store ref to symbol
-                    unsigned int cursymno = tkVal;
-                    struct asmsym * cursym = symtbl + cursymno;
+                    unsigned int16_t cursymno = tkVal;
+                    struct asmsym * cursym = tkSym;
 
-                    unsigned int val = 0;
+                    unsigned int16_t val = 0;
                     ntok();
                     if ( tk == TOK_MATH )
                     {
-                        char doNeg = tkVal;
+                        int8_t doNeg = tkVal;
 
                         ntok();
                         if ( tk != TOK_NUM ) asmfail("expected numerical constant");
@@ -303,7 +299,7 @@ void assemble( char * fpath )
                     // Program counter relative symbol
                     else if ( (cursym->type & SYM_MASK) == curseg->sym )
                     {
-                        int disp = cursym->val - curseg->data.pos + val;
+                        int16_t disp = cursym->val - curseg->data.pos + val;
 
                         // Out of bounds
                         if ( disp < -128 || disp > 127 ) asmfail("label outside displacement range");
@@ -312,7 +308,7 @@ void assemble( char * fpath )
                         opval |= disp & 0xFF | 0x100;
                     }
                     // Symbol not in current segment
-                    else
+                    else if ( flags & FLG_DATA )
                     {
                         asmfail("label not in current segment");
                     }
@@ -365,20 +361,36 @@ void assemble( char * fpath )
                 }
             }
             // Trap instruction
-            // Needs an 11-bit trap number
+            // Needs an 2 accumulators and a 7-bit trap number
             else if ( optyp == DGN_TRAP )
             {
-                // Ensure this is an 11-bit numerical constant
+                // Get source accumulator
                 ntok();
-                if ( tk != TOK_NUM || tk < 0 || tk > 2047 ) asmfail("invalid trap code");
-                opval |= tkVal < 4;
+                if ( tk != TOK_NUM || tk < 0 || tk > 3 ) asmfail("expected source accumulator");
+                opval |= tkVal << 13;
+
+                ntok();
+                if ( tk != TOK_ARG ) asmfail("expected a comma");
+
+                // Get destination accumulator
+                ntok();
+                if ( tk != TOK_NUM || tk < 0 || tk > 3 ) asmfail("expected destination accumulator");
+                opval |= tkVal << 11;
+
+                ntok();
+                if ( tk != TOK_ARG ) asmfail("epxected a comma");
+
+                // Get 7 bit trap number
+                ntok();
+                if ( tk != TOK_NUM || tk < 0 || tk > 127 ) asmfail("invalid trap code, expected 0 through 127");
+                opval |= tkVal << 4;
 
                 ntok();
             }
             // System Control Instruction (CPU, MMU, FPU, etc.)
             else if ( optyp >= DGN_CT && optyp <= DGN_CTAA )
             {
-                if ( optyp == DGN_CTA || optyp == DGN_CTAF || optyp == DGN_CTAA )
+                if ( optyp >= DGN_CTA )
                 {
                     // Get accumulator
                     ntok();
@@ -399,6 +411,39 @@ void assemble( char * fpath )
 
                 ntok();
             }
+            // Virtual Instruction Emulation
+            else if ( optyp >= DGN_VI && optyp <= DGN_VIAA )
+            {
+                if ( optyp >= DGN_VIA )
+                {
+                    // Get accumulator
+                    ntok();
+                    if ( tk != TOK_NUM || tkVal < 0 || tkVal > 3 ) asmfail("expected an accumulator");
+                    opval |= tkVal << 13;
+
+                    if ( optyp == DGN_VIAA )
+                    {
+                        ntok();
+                        if ( tk != TOK_ARG ) asmfail("expected a comma");
+
+                        // Get second accumulator
+                        ntok();
+                        if ( tk != TOK_NUM || tkVal < 0 || tkVal > 3 ) asmfail("expected a second accumulator");
+                        opval |= tkVal << 11;
+                    }
+                }
+
+                if ( btarget & CPU_ETRAP ) // Emulate trap instruction intro
+                {
+                    segset( curseg, SYM_ABS, 054046 ); // STA 3, 046
+                    curseg->data.pos++;
+                    segset( curseg, SYM_ABS, 006047 ); // JSR@ 047
+                    curseg->data.pos++;
+                }
+
+                ntok();
+            }
+
 
             segset( curseg, oprlc, opval );
 
@@ -421,34 +466,24 @@ void assemble( char * fpath )
             if ( tk != TOK_NAME ) asmfail("expected a label");
 
             // Make label global
-            symtbl[tkVal].type |= SYM_GLOB;
+            tkSym->type |= SYM_GLOB;
 
             ntok(); // Get comma or next statement
         }
-        // Assembler .define directive
-        else if ( tk == ASM_DEFN )
+        // Assembler .loc directive
+        else if ( tk == ASM_LOC )
         {
-            // Get label
             ntok();
-            if ( tk != TOK_NAME ) asmfail("expected a label");
+            if ( tk != TOK_NUM ) asmfail("expected a number");
 
-            // Store ref to symbol
-            struct asmsym * cursym = symtbl + tkVal;
+            while ( tkVal )
+            {
+                // Don't actually write to bss
+                if ( curseg != &bss ) segset( curseg, SYM_ABS, 0 );
+                curseg->data.pos++;
 
-            // Already defined symbol
-            if ( (cursym->type & SYM_MASK) != SYM_DEF ) asmfail("label already defined");
-
-            // Get comma
-            ntok();
-            if ( tk != TOK_ARG ) asmfail("expected a comma");
-
-            // Get numerical value to assign
-            ntok();
-            if ( tk != TOK_NUM ) asmfail("expected a constant value");
-
-            // Assign value to absolute symbol
-            cursym->type = SYM_ABS | SYM_GLOB;
-            cursym->val = tkVal;
+                tkVal--;
+            }
 
             ntok();
         }
@@ -460,12 +495,10 @@ void assemble( char * fpath )
 
             if ( flags & FLG_DATA )
             {
-                struct asmsym * cursym = symtbl + tkVal;
-
-                if ( (cursym->type & SYM_MASK) != SYM_TEXT ) asmfail("label must be a text label");
+                if ( (tkSym->type & SYM_MASK) != SYM_TEXT ) asmfail("label must be a text label");
 
                 // Update entry position
-                entrypos = cursym->val;
+                entrypos = tkSym->val;
             }
 
             ntok();
@@ -478,7 +511,7 @@ void assemble( char * fpath )
             ntok();
             if ( tk != TOK_STR ) asmfail("expected a string");
 
-            unsigned int i = 0;
+            unsigned int16_t i = 0;
             while ( i < tkVal )
             {
                 segset( curseg, SYM_ABS, ustr[i++] & 0xFF );

@@ -1,10 +1,19 @@
 #include "../lib/novanix.h"
 #include "../lib/a.out.h"
 
-#define MAX_LINE 256  // Maximum number of tokens per file line
-#define MAX_STR  256  // Maximum length of user defined strings
-#define PAGESIZE 1024 // 2 KB (1 KW) of memory (1 mmu page)
-#define ASM_SIZE 72   // Number of assembler defined symbols
+#define DEBUG 1
+
+#ifdef DEBUG
+#define DEBUG_TOKEN 1
+#define DEBUG_EXPR 1
+#endif
+
+#define MAX_LINE      256  // Maximum number of tokens per file line
+#define MAX_STR       256  // Maximum length of user defined strings
+#define PAGESIZE      1024 // 2 KB (1 KW) of memory (1 mmu page)
+#define MAX_EXPR_OPER 64   // Maximum size of the expression operator stack
+#define MAX_EXPR_NODE 256  // Maximum size of the expression node stack
+#define MAX_SUB_TYPE  8    // Maximum number of subtypes per type
 
 // +--------------+
 // | TOKEN VALUES |
@@ -12,17 +21,23 @@
 // Start at 128 so that we don't overlap ASCII tokens
 enum
 {
-    Number = 128, // Numerical constant in source
-    Named, // Named variable of function
-    Define, // Defined pre-compiler constant
-    Reserved, // Reserved word
 // ******* Reserved words *******
-    Void, Int, Char, Float, Long, // Types
-    Auto, Signed, Const, Extern, Register, Unsigned, Static, // Storage classes
-    If, Else, Case, Default, Break, Continue, Return, // Program Structure
-    For, While, Do, // Loops
+    // *** Specifiers and qualifiers ***
+    Void = 128, Int, Short, Char, Float, Long, // Storage types
     Enum, Struct, Union, // Data structures
-    Sizeof, // Technically this is an operator
+    Auto, Static, Register, Const, // Storage classes
+    Extern, Signed, Unsigned, // Storage Qualifiers
+    // *** Program structure ***
+    If, Else, Case, Default, // Branch
+    Break, Continue, Return, // Terminate
+    For, While, Do, // Loops
+    Goto, // Blasphemy
+    SizeofRes, // Used only for identifying the reserved word, not be confused with Sizeof
+// ******* Misc *******
+    Variadic,
+// ******* Expression tokens *******
+    Number, SmolNumber, LongNumber, // Numerical constant in source (Char, Int, Long)
+    Named, Variable, // Named (an identifier string), Variable (ref to user defiend variable)
 // ******* Operators *******
     Ass, AddAss, SubAss, MulAss, DivAss, ModAss, ShlAss, ShrAss, AndAss, XorAss, OrAss, // Assignment Operators
     Tern, // Ternary Conditional
@@ -31,99 +46,229 @@ enum
     Or, // Bitwise Or
     Xor, // Bitwise Xor
     And, // Bitwise And
-    Eq, Ne, // Relational equal and not-equal
+    Eq, Neq, // Relational equal and not-equal
     Less, LessEq, Great, GreatEq, // Relational equivalencies
     Shl, Shr, // Bitshift left and right
     Add, Sub, // Addition and Subtraction
     Mul, Div, Mod, // Multiplication, Division, Modulus
-    LogNot, Not, Inc, Dec, // Logical not, not, increment and decrement
-    Brak, Dot, Arrow // Square bracket (array access), Dot (structure access), Arrow (structure access via pointer)
+    Sizeof, LogNot, Not, Plus, Minus, Inder, Deref, PreInc, PreDec, // Sizeof, logical not, bitwise not, Pre-Increment, Pre-Decrement
+    PostInc, PostDec, Dot, Arrow // Post-Increment, Post-Decrement, Dot (structure access), Arrow (structure access via pointer)
 };
 
-// Symbol type bit pattern
-// |0000|0000|0|0|0|0|00|000
-// |         | | | | |  |C Data type
-// |         | | | | |C Storage type
-// |         | | | |Signed flag
-// |         | | |Extern flag
-// |         | |Constant flag
-// |         |Function flag
+#ifdef DEBUG
+int8_t * tokenNames[] = {
+    "void", "int", "short", "char", "float", "long",
+    "enum", "struct", "union",
+    "auto", "static", "register", "const",
+    "extern", "signed", "unsigned",
+    "if", "else", "case", "default",
+    "break", "continue", "return",
+    "for", "while", "do",
+    "goto",
+    "sizeof (reserved word)",
+    "...",
+    "number", "small number", "long number",
+    "named", "variable",
 
-// C Data types
-#define CPL_VOID 0 // Void (0 bit)
-#define CPL_CHAR 1 // Character (8 bit)
-#define CPL_INT  2 // Integer (16 bit)
-#define CPL_LONG 3 // Long (32 bit)
-#define CPL_FPV  4 // Floating point value
-#define CPL_STRC 5 // Structure (Enums and Unions are technically also structs, might want to just merge them all together)
-#define CPL_ENUM 6 // Enumeration
-#define CPL_UNI  7 // Union
+    "=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "^=", "|=",
+    "?",
+    "||",
+    "&&",
+    "|",
+    "^",
+    "&",
+    "==", "!=",
+    "<", "<=", ">", ">=",
+    "<<", ">>",
+    "+", "-",
+    "*", "/", "%",
+    "sizeof (operator)", "!", "~", "(unary) +", "(unary) -", "(unary) &", "(unary) *", "(pre) ++", "(pre) --",
+    "(post) ++", "(post) --", ".", "->"
+};
+
+int8_t * typeNames[] = {
+    "void",
+    "char",
+    "uchar",
+    "int",
+    "uint",
+    "long",
+    "ulong",
+    "float",
+    "double",
+    "struct",
+    "union",
+    "enum"
+};
+#endif
+
+/* Namespace attributes bitmask
+
+|0000|0|000
+|    | |Namespace type
+|    |Defined flag
+
+*/
+
+#define CPL_BLOCK 0 // Block scope
+#define CPL_STRC  1 // Struct
+#define CPL_UNION 2 // Union
+#define CPL_ENUM  3 // Enumeration
+#define CPL_FUNC  4 // Function arguments
+#define CPL_VFUNC 5 // Variadic Function arguments
+#define CPL_NSPACE_MASK 7
+
+#define CPL_DEFN 8 // Defined flag
+
+// NameSPace
+struct mccnsp
+{
+    int8_t * name; // NULL if anonymous
+    unsigned int8_t len; // Length of name
+
+    unsigned int8_t type; // Type of namespace
+
+    unsigned int16_t size; // Number of bytes occupied by member symbols
+
+    struct mccsym * symtbl, ** symtail; // Member symbols
+    struct mccnsp * nsptbl, ** nsptail; // Child namespaces
+
+    struct mccnsp * parent; // Parent namespace
+
+    struct mccnsp * next; // Next namespace in this list
+};
+
+/* Type examples (because I keep forgetting)
+
+*** Function pointer ***
+
+long (*test)();
+
+mccsym->name = "test";
+mccsym->ptype = CPL_INT;
+
+mccsym->type = mcctype1
+
+mcctype1->inder = 1
+mcctype1->type = mcctype2
+
+mcctype2->ftype = mccnsp_args // Function argument namespace
+
+*** Function declaration ***
+
+struct myvar * test( ) { ...some code... }
+
+mccsym->name = "test"
+
+mccsym->stype = ptr_to_myvar_symbol
+
+mccsym->type = mcctype
+
+mcctype->inder = 1;
+mcctype->ftype = mccnsp_args // Function argument namespace
+
+mccnsp_args->nsptbl = mccnsp_code // Code namespace is a child
+*/
+
+/* Data type bitmask
+
+|0|0|00|0000
+| | |  |Primative datatype
+| | |Storage type
+| |Extern flag
+
+*/
+
+#define CPL_VOID 0 // ( 0 bits) Void
+#define CPL_CHR  1 // ( 8 bits) Signed Character
+#define CPL_UCHR 2 // ( 8 bits) Unsigned Character
+#define CPL_INT  3 // (16 bits) Signed Integer
+#define CPL_UINT 4 // (16 bits) Unsigned Integer
+#define CPL_LNG  5 // (32 bits) Signed Long
+#define CPL_ULNG 6 // (32 bits) Unsigned Long
+#define CPL_FPV  7 // (32 bits) DG Nova Float
+#define CPL_DBL  8 // (64 bits) DG Nova Double
+#define CPL_DTYPE_MASK 15 // Mask
 
 // C Storage types
-#define CPL_ZERO 0 << 3 // Zero page (register)
-#define CPL_TEXT 1 << 3 // Text (write only)
-#define CPL_DATA 2 << 3 // Data (static)
-#define CPL_STAK 3 << 3 // Stack (dynamic)
+#define CPL_TEXT 0 << 4 // Text (write only) (functions and constants)
+#define CPL_ZERO 1 << 4 // Zero page (register)
+#define CPL_DATA 2 << 4 // Data (static)
+#define CPL_STAK 3 << 4 // Stack (dynamic)
+#define CPL_STORE_MASK 3 << 4 // Mask
 
-// C attribute flags
-#define CPL_SIGN 1 << 5 // Signed flag
+// C Storage qualifiers
 #define CPL_XTRN 1 << 6 // Extern flag
-#define CPL_CNST 1 << 7 // Constant flag
-#define CPL_FUNC 1 << 8 // C Function flag (text segment)
 
-// Symbol
-struct symbol
+// Type information
+struct mccsubtype
 {
-    char name[MAX_TOKN]; // Name of symbol
+    // Total number of indirections = inder + arrays;
+    unsigned int8_t inder; // Number of inderections
+    unsigned int8_t arrays; // Number of sizes
 
-    unsigned int val; // Data stored in the symbol or address of the symbol
-    unsigned int type;
+    unsigned int16_t * sizes; // List of array sizes
 
-    unsigned char indir; // Number of inderections
-    unsigned char scope; // 0 = File scope, every { and } increase/decrease scope
-
-    // For function symbols only
-    unsigned char argc; // Number of arguments
-    unsigned int dataPos; // Current offset for current member symbol on the stack
-    unsigned int dataMax; // Maximum offset for all member symbols on the stack
-
-    // Member symbols
-    struct symbol * syms;
-    struct symbol ** symsEnd;
-
-    struct symbol * next; // Next node in list
+    struct mccnsp * ftype; // Function namespace (NULL if not a function)
+    struct mccsubtype * sub; // Sub type
 };
 
-struct relocate
+struct mcctype
 {
-    unsigned int head;
-    unsigned int addr;
+    unsigned int8_t ptype; // Primative datatype
+    struct mccnsp * stype; // Struct type
+    struct mccsubtype * sub; // Complex type information (MUST NEVER BE NULL)
+};
+
+// Symbol
+struct mccsym
+{
+    int8_t * name;
+    unsigned int8_t len;
+
+    unsigned int16_t addr; // Offset from start of segment
+    struct mcctype type; // Type information
+
+    struct mccsym * next; // Store the next symbol in the table
+};
+
+#define CPL_LVAL 1 << 0 // True if this node contains an l-value
+
+// Tree node
+struct mccnode
+{
+    unsigned int8_t oper; // What operation does this node represent
+    unsigned int8_t flag; // Flags for this node
+
+    struct mcctype * type; // Type information
+
+    // Leafs are either a constant value, or a named symbol
+    union {
+        struct {
+            unsigned int16_t val;
+            int8_t * name;
+        };
+        struct mccsym * sym;
+        unsigned int32_t valLong;
+    };
+
+    struct mccnode * left, * right;
 };
 
 // Store a data segment
 struct segment
 {
-    // Segment's data as it appears in memory
-    unsigned int * data;
-    unsigned int dataPos;
-    unsigned int dataSize;
-
-    // Relocation information for this segment
-    struct relocate * rloc;
-    unsigned int rlocPos;
-    unsigned int rlocSize;
-
-    unsigned char sym; // The symbol type
+    int16_t fd;
+    unsigned int16_t pos;
+    unsigned int16_t size;
 };
 
-// Assembly fail function
-void mccfail(char * msg);
+// Compiler fail function
+void mccfail(int8_t * msg);
 
-// Unix system calls
-void exit(int status);
-int creat(const char * pathname, int mode);
-int  open(const char * pathname, int flags);
-int close(int fd);
-int  read(int fd, void * buf, unsigned int count);
-int write(int fd, void * buf, unsigned int count);
-void * sbrk(int inc);
+void define(struct mccnsp * curnsp);
+
+#ifdef DEBUG
+void writeToken(int16_t fd, unsigned int8_t tokn);
+void dumpTree(struct mccnode * n, int8_t * fname);
+#endif
